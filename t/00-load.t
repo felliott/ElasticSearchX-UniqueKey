@@ -3,8 +3,8 @@
 use Test::More 0.96;
 use Test::Exception;
 use Test::Deep;
-use ElasticSearch 0.55;
-use ElasticSearch::TestServer;
+use Elasticsearch 0.76;
+use Elasticsearch::TestServer;
 
 BEGIN {
     use_ok('ElasticSearchX::UniqueKey') || print "Bail out!";
@@ -15,18 +15,21 @@ diag(
     "Testing ElasticSearchX::UniqueKey $ElasticSearchX::UniqueKey::VERSION, Perl $], $^X"
 );
 
-our $es = eval {
-    ElasticSearch::TestServer->new(
+my $server = eval {
+    Elasticsearch::TestServer->new(
+        es_home     => $ENV{ES_HOME},
         instances   => 1,
         transport   => 'http',
         trace_calls => 'log'
     );
 };
 
-if ($es) {
+if ($server) {
+    my $nodes = $server->start();
+    our $es = Elasticsearch->new( nodes => $nodes );
     run_test_suite();
     note "Shutting down servers";
-    $es->_shutdown_servers;
+    $server->shutdown();
 }
 else {
     diag $_ for split /\n/, $@;
@@ -39,11 +42,11 @@ sub run_test_suite {
 
     # Setup
     ok $uniq->bootstrap, 'Bootstrap';
-    ok $es->index_exists( index => 'unique_key' );
-    ok $es->mapping( index => 'unique_key', type => '_default_' )
+    ok $es->indices->exists( index => 'unique_key' );
+    ok $es->indices->get_mapping( index => 'unique_key', type => '_default_' )
         ->{_default_}, 'Has default mapping';
 
-    is $es->index_settings( index => 'unique_key' )
+    is $es->indices->get_settings( index => 'unique_key' )
         ->{unique_key}{settings}{'index.number_of_shards'}, 1,
         'Index has default settings';
 
@@ -116,13 +119,13 @@ sub run_test_suite {
 
     # Custom setup
 
-    ok $es->mapping( index => 'unique_key' )->{unique_key}{foo},
+    ok $es->indices->get_mapping( index => 'unique_key' )->{unique_key}{foo},
         'Has type foo';
     ok $uniq->delete_type('foo'), 'Delete type';
-    ok !$es->mapping( index => 'unique_key' )->{unique_key}{foo},
+    ok !$es->indices->get_mapping( index => 'unique_key' )->{unique_key}{foo},
         'Type deleted';
     ok $uniq->delete_index, 'Delete index';
-    ok !$es->index_exists( index => 'unique_key' ), 'Index deleted';
+    ok !$es->indices->exists( index => 'unique_key' ), 'Index deleted';
 
     throws_ok sub { ElasticSearchX::UniqueKey->new },
         qr/Missing required param es/, 'No es';
@@ -130,8 +133,8 @@ sub run_test_suite {
         'Custom index';
     is $uniq->index, 'bar', 'Custom index set';
     ok $uniq->bootstrap( number_of_shards => 2 ), 'Boostrapped custom index';
-    ok $es->index_exists( index => 'bar' ), 'Custom index exists';
-    is $es->index_settings( index => 'bar' )
+    ok $es->indices->exists( index => 'bar' ), 'Custom index exists';
+    is $es->indices->get_settings( index => 'bar' )
         ->{bar}{settings}{'index.number_of_shards'}, 2,
         'Index has custom settings';
 

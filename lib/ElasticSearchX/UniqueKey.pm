@@ -3,6 +3,7 @@ package ElasticSearchX::UniqueKey;
 use strict;
 use warnings;
 use Carp;
+use Elasticsearch::Bulk;
 
 #===================================
 sub new {
@@ -27,11 +28,11 @@ sub create {
     my %params = $self->_params( 'create', @_ );
 
     eval {
-        $self->es->create( %params, data => {} );
+        $self->es->create( %params, body => {} );
         1;
     }
         && return 1;
-    return 0 if $@->isa('ElasticSearch::Error::Conflict');
+    return 0 if $@->isa('Elasticsearch::Error::Conflict');
     croak $@;
 }
 
@@ -40,7 +41,7 @@ sub delete {
 #===================================
     my $self = shift;
     my %params = $self->_params( 'delete', @_ );
-    $self->es->delete( %params, ignore_missing => 1 );
+    $self->es->delete( %params, ignore => 404 );
 }
 
 #===================================
@@ -73,20 +74,26 @@ sub multi_create {
 #===================================
     my ( $self, %keys ) = @_;
 
-    my @docs = map { { type => $_, id => $keys{$_}, data => {} } } keys %keys;
-
     my %failed;
-    $self->es->bulk_create(
+    my $bulk = Elasticsearch::Bulk->new(
+        es          => $self->es,
         index       => $self->index,
-        docs        => \@docs,
         on_conflict => sub {
-            my ( $action, $doc ) = @_;
-            $failed{ $doc->{type} } = $doc->{id};
+            my ( $action, $doc, $i ) = @_;
+            $failed{ $doc->{_type} } = $doc->{_id};
         },
-        on_error => sub {
-            die "Error creating multi unique keys: $_[2]";
+        on_error    => sub {
+            my ($action, $response, $i) = @_;
+            die "Error creating multi unique keys: " . $response->{error};
         }
     );
+
+    my @docs = map { {
+        type => $_, id => $keys{$_}, source => { body => {} },
+    } } keys %keys;
+    $bulk->create(@docs);
+    $bulk->flush();
+
     if (%failed) {
         delete @keys{ keys %failed };
         $self->multi_delete(%keys);
@@ -99,15 +106,19 @@ sub multi_delete {
 #===================================
     my ( $self, %keys ) = @_;
 
-    my @docs = map { { type => $_, id => $keys{$_} } } keys %keys;
 
-    $self->es->bulk_delete(
+    my $bulk = Elasticsearch::Bulk->new(
+        es       => $self->es,
         index    => $self->index,
-        docs     => \@docs,
         on_error => sub {
             die "Error deleting multi unique keys: $_[2]";
-        }
+        },
     );
+
+    my @docs = map { { type => $_, id => $keys{$_} } } keys %keys;
+    $bulk->delete(@docs);
+    $bulk->flush();
+
     return 1;
 }
 
@@ -133,8 +144,10 @@ sub multi_exists {
 #===================================
     my ( $self, %keys ) = @_;
     my @docs = map { { _type => $_, _id => $keys{$_} } } keys %keys;
-    my $exists = $self->es->mget( index => $self->index, docs => \@docs );
-    for (@$exists) {
+    my $exists = $self->es->mget(
+        index => $self->index, body => { docs => \@docs },
+    );
+    for (@{ $exists->{docs} }) {
         next unless $_->{exists};
         delete $keys{ $_->{_type} };
     }
@@ -169,21 +182,23 @@ sub bootstrap {
 
     my $es    = $self->es;
     my $index = $self->index;
-    return if $es->index_exists( index => $index );
+    return if $es->indices->exists( index => $index );
 
-    $es->create_index(
-        index    => $index,
-        settings => \%params,
-        mappings => {
-            _default_ => {
-                _all    => { enabled => 0 },
-                _source => { enabled => 0 },
-                _type   => { index   => 'no' },
-                enabled => 0,
-            }
-        }
+    $es->indices->create(
+        index => $index,
+        body  => {
+            settings => \%params,
+            mappings => {
+                _default_ => {
+                    _all    => { enabled => 0 },
+                    _source => { enabled => 0 },
+                    _type   => { index   => 'no' },
+                    enabled => 0,
+                }
+            },
+        },
     );
-    $es->cluster_health( wait_for_status => 'yellow' );
+    $es->cluster->health( wait_for_status => 'yellow' );
     return $self;
 }
 
@@ -200,10 +215,10 @@ sub delete_type {
     croak "No type passed to delete_type()"
         unless defined $type and length $type;
 
-    $self->es->delete_mapping(
-        index          => $self->index,
-        type           => $type,
-        ignore_missing => 1
+    $self->es->indices->delete_mapping(
+        index   => $self->index,
+        type    => $type,
+        ignore  => 404
     );
     return $self;
 }
@@ -212,7 +227,7 @@ sub delete_type {
 sub delete_index {
 #===================================
     my $self = shift;
-    $self->es->delete_index( index => $self->index, ignore_missing => 1 );
+    $self->es->indices->delete( index => $self->index, ignore => 404 );
     return $self;
 }
 
