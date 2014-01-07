@@ -31,7 +31,7 @@ sub create {
         1;
     }
         && return 1;
-    return 0 if $@->isa('ElasticSearch::Error::Conflict');
+    return 0 if $@->isa('Elasticsearch::Error::Conflict');
     croak $@;
 }
 
